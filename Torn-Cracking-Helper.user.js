@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Cracking Helper
-// @namespace    nodelore.torn.crack-helper.floating
+// @namespace    craigicorn.torn.cracking-helper
 // @version      1.0.0
 // @description  Embedded Cracking Helper with global dictionary selector and manually saved incorrect guesses
-// @author       nodelore[2786679] NEvaldas[352097]
+// @author       craigicorn[] nodelore[2786679] NEvaldas[352097]
 // @match        https://www.torn.com/page.php*
 // @match        https://www.torn.com/loader.php*
 // @run-at       document-start
