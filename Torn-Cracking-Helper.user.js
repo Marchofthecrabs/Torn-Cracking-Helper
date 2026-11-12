@@ -1,7 +1,7 @@
  // ==UserScript==
  // @name         Torn Cracking Helper
  // @namespace    craigicorn.torn.cracking-helper
- // @version      1.1
+ // @version      1.2
  // @description  Embedded Cracking Helper with dictionary suggestions and locally saved incorrect guesses
  // @author       craigicorn[3850118]
  // @match        https://www.torn.com/page.php*
