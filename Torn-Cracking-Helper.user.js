@@ -11,6 +11,8 @@
  // @grant        GM_xmlhttpRequest
  // @connect      raw.githubusercontent.com
  // @license      MIT
+ // @updateURL    https://github.com/Marchofthecrabs/Torn-Cracking-Helper/raw/refs/heads/main/Torn-Cracking-Helper.user.js
+ // @downloadURL  https://github.com/Marchofthecrabs/Torn-Cracking-Helper/raw/refs/heads/main/Torn-Cracking-Helper.user.js
  // ==/UserScript==
 
 (function () {
