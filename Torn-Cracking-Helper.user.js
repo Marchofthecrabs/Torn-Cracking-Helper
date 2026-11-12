@@ -1,19 +1,19 @@
- // ==UserScript==
- // @name         Torn Cracking Helper
- // @namespace    craigicorn.torn.cracking-helper
- // @version      1.3
- // @description  Embedded Cracking Helper with dictionary suggestions and locally saved incorrect guesses
- // @author       craigicorn[3850118]
- // @match        https://www.torn.com/page.php*
- // @match        https://www.torn.com/loader.php*
- // @run-at       document-idle
- // @grant        GM.xmlHttpRequest
- // @grant        GM_xmlhttpRequest
- // @connect      raw.githubusercontent.com
- // @license      MIT
- // @updateURL    https://github.com/Marchofthecrabs/Torn-Cracking-Helper/raw/refs/heads/main/Torn-Cracking-Helper.user.js
- // @downloadURL  https://github.com/Marchofthecrabs/Torn-Cracking-Helper/raw/refs/heads/main/Torn-Cracking-Helper.user.js
- // ==/UserScript==
+// ==UserScript==
+// @name         Torn Cracking Helper
+// @namespace    craigicorn.torn.cracking-helper
+// @version      1.3
+// @description  Embedded Cracking Helper with dictionary suggestions and locally saved incorrect guesses
+// @author       craigicorn[3850118]
+// @match        https://www.torn.com/page.php*
+// @match        https://www.torn.com/loader.php*
+// @run-at       document-idle
+// @grant        GM.xmlHttpRequest
+// @grant        GM_xmlhttpRequest
+// @connect      raw.githubusercontent.com
+// @license      MIT
+// @updateURL    https://github.com/Marchofthecrabs/Torn-Cracking-Helper/raw/refs/heads/main/Torn-Cracking-Helper.user.js
+// @downloadURL  https://github.com/Marchofthecrabs/Torn-Cracking-Helper/raw/refs/heads/main/Torn-Cracking-Helper.user.js
+// ==/UserScript==
 
 (function () {
   'use strict';
