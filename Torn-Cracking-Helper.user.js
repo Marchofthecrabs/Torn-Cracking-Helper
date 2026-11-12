@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Cracking Helper
 // @namespace    craigicorn.torn.cracking-helper
-// @version      1.5.1
+// @version      1.5.2
 // @description  Embedded Cracking Helper with dictionary suggestions and locally saved incorrect guesses
 // @author       craigicorn[3850118]
 // @match        https://www.torn.com/page.php*
@@ -1272,39 +1272,35 @@
           '[class*="crimeOptionWrapper"]'
         );
 
-      // Torn renders its success/failure outcome in an overlay. It can
-      // overlap the helper without contributing to the wrapper's scrollHeight.
-      // Reserve room above the helper while the outcome is displayed.
+      // Torn's outcome is an absolutely positioned overlay. Its height does
+      // not necessarily contribute to the card's scrollHeight. Calculate the
+      // clearance from the ORIGINAL row height, never from a row height we
+      // previously expanded (which would cause runaway blank space).
       const outcome = selectedRow.querySelector(
         '[class*="innerOutcomeWrapper"]'
       );
-      const outcomeRect = outcome?.getBoundingClientRect();
-      const panelRect = panel.getBoundingClientRect();
-      const currentGap = parseFloat(panel.style.marginTop) || 0;
-      const outcomeVisible = outcomeRect && outcomeRect.height > 0 &&
-        outcomeRect.width > 0 && getComputedStyle(outcome).display !== 'none' &&
-        getComputedStyle(outcome).visibility !== 'hidden';
-      const outcomeGap = outcomeVisible
-        ? Math.max(0, Math.ceil(outcomeRect.bottom -
-            (panelRect.top - currentGap) + 6))
+      const outcomeStyle = outcome ? getComputedStyle(outcome) : null;
+      const outcomeVisible = outcome && outcome.getClientRects().length > 0 &&
+        outcomeStyle.display !== 'none' &&
+        outcomeStyle.visibility !== 'hidden' &&
+        outcomeStyle.opacity !== '0';
+      const outcomeHeight = outcomeVisible
+        ? Math.ceil(outcome.getBoundingClientRect().height)
         : 0;
-      if (currentGap !== outcomeGap) {
-        panel.style.marginTop = outcomeGap ? outcomeGap + 'px' : '';
+
+      // The ordinary password row already occupies originalRowHeight.
+      // Only the portion of the outcome extending below it needs clearance.
+      const outcomeGap = Math.max(0, outcomeHeight - originalRowHeight + 8);
+      const desiredMargin = outcomeGap ? outcomeGap + 'px' : '';
+      if (panel.style.marginTop !== desiredMargin) {
+        panel.style.marginTop = desiredMargin;
       }
 
-      // Include the bottom of both the normal content and any overlaid
-      // outcome. Virtual rows are absolutely positioned, so simply changing
-      // the selected row's height does not move the following rows.
-      const rowRect = selectedRow.getBoundingClientRect();
-      const contentHeight = Math.max(
-        wrapper ? wrapper.scrollHeight : originalRowHeight,
-        panelRect.bottom - rowRect.top + (outcomeGap - currentGap),
-        outcomeVisible ? outcomeRect.bottom - rowRect.top + 6 : 0
-      );
-
-      const extraHeight = Math.max(
-        0,
-        Math.ceil(contentHeight - originalRowHeight)
+      // Derive the virtual-list extension solely from stable measurements.
+      // In particular, do NOT use wrapper.scrollHeight while the row has an
+      // applied height: Torn can stretch the wrapper to that height.
+      const extraHeight = Math.max(0,
+        Math.ceil(panel.offsetHeight + outcomeGap)
       );
 
       for (const row of rows) {
