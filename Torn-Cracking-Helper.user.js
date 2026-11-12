@@ -1,4 +1,3 @@
-
  // ==UserScript==
  // @name         Torn Cracking Helper
  // @namespace    craigicorn.torn.cracking-helper
