@@ -1,23 +1,23 @@
-// ==UserScript==
-// @name         Torn Cracking Helper
-// @namespace    craigicorn.torn.cracking-helper
-// @version      1.0.0
-// @description  Embedded Cracking Helper with global dictionary selector and manually saved incorrect guesses
-// @author       craigicorn[] nodelore[2786679] NEvaldas[352097]
-// @match        https://www.torn.com/page.php*
-// @match        https://www.torn.com/loader.php*
-// @run-at       document-start
-// @grant        GM_xmlhttpRequest
-// @grant        unsafeWindow
-// @connect      raw.githubusercontent.com
-// @license      MIT
-// ==/UserScript==
+
+ // ==UserScript==
+ // @name         Torn Cracking Helper
+ // @namespace    craigicorn.torn.cracking-helper
+ // @version      1.0
+ // @description  Embedded Cracking Helper with dictionary suggestions and locally saved incorrect guesses
+ // @author       craigicorn[3850118]
+ // @match        https://www.torn.com/page.php*
+ // @match        https://www.torn.com/loader.php*
+ // @run-at       document-idle
+ // @grant        GM.xmlHttpRequest
+ // @grant        GM_xmlhttpRequest
+ // @connect      raw.githubusercontent.com
+ // @license      MIT
+ // ==/UserScript==
 
 (function () {
   'use strict';
 
-  const VERSION = '1.0.0';
-  const INSTANCE_KEY = '__TCH_EMBEDDED_V100__';
+  const INSTANCE_KEY = '__TCH_FIREFOX_DOM_PERSISTENCE_INSTANCE__';
 
   if (window[INSTANCE_KEY]) return;
   window[INSTANCE_KEY] = true;
@@ -30,8 +30,9 @@
   };
 
   const SOURCE_KEY = 'CRACKER_STATUS';
-  const STORAGE_KEY = 'TCH_MANUAL_EXCLUSIONS_V160';
+  const STORAGE_KEY = 'TCH_FIREFOX_DOM_EXCLUSIONS_V1';
   const MAX_CANDIDATES = 10;
+  const SAVED_GUESS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
   const ITEM_SELECTOR = '.virtual-item';
   const LIST_SELECTOR = '[class*="virtualList"]';
@@ -50,6 +51,8 @@
   let loadState = 'Waiting';
   let requestId = 0;
 
+  const domCardIds = new WeakMap();
+  let nextDomCardId = 1;
   let allTargets = [];
   let hasServerList = false;
   let waitingForTargets = true;
@@ -82,6 +85,11 @@
 
   let lastPageLocation = '';
   let initialized = false;
+  let editorRefreshTimer = null;
+
+  // Dynamic virtual-list measurements.
+  // These are derived from Torn's original row positions.
+  const spacingCache = new WeakMap();
 
   try {
     const parsed = JSON.parse(
@@ -94,6 +102,17 @@
       !Array.isArray(parsed)
     ) {
       saved = parsed;
+      const now = Date.now();
+      let expired = false;
+      for (const [identity, record] of Object.entries(saved)) {
+        if (!record || !Number.isFinite(record.updated) ||
+            now - record.updated >= SAVED_GUESS_TTL_MS ||
+            record.updated > now + 60 * 1000) {
+          delete saved[identity];
+          expired = true;
+        }
+      }
+      if (expired) localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
     }
   } catch (_) {}
 
@@ -153,32 +172,6 @@
     return result;
   }
 
-  function fingerprint(target) {
-    return JSON.stringify([
-      target?.ID,
-      target?.password?.length ?? null,
-      target?.difficulty ?? null,
-      target?.type ?? null,
-      target?.name ?? null
-    ]);
-  }
-
-  function patternFromTarget(target) {
-    if (!Array.isArray(target?.password)) return '';
-
-    return target.password.map(slot => {
-      const character = String(
-        slot?.char ?? ''
-      ).trim().toLowerCase();
-
-      if (/^[a-z0-9]$/.test(character)) {
-        return character;
-      }
-
-      return character === 'ø' ? '0' : '.';
-    }).join('');
-  }
-
   function readPattern(card) {
     if (!card) return '';
 
@@ -213,118 +206,208 @@
       .join('');
   }
 
-  function readTargets() {
-    if (hasServerList) return allTargets;
+  // The virtual list contains only rendered cards; its DOM index is NOT stable.
+  // Match by target type, service and length, then validate revealed characters.
+  function targetIdentity(card, pattern) {
+    const type = card.querySelector('[class*="type__"]')?.textContent?.trim() || '';
+    const service = card.querySelector('[class*="service__"]')?.textContent?.trim() || '';
+    if (!type || !service || !pattern) return null;
+    return JSON.stringify([type, service, pattern.length]);
+  }
 
-    return Array.from(
-      document.querySelectorAll('.crime-option')
-    ).map((card, index) => ({
-      id: 'temporary-' + index,
-      pattern: readPattern(card),
-      fingerprint: null,
-      temporary: true
-    }));
+  function readTargets() {
+    const cards = Array.from(document.querySelectorAll('.crime-option'));
+    const previous = new Map(allTargets.map(t => [String(t.id), t]));
+    const next = cards.map(card => {
+      const pattern = readPattern(card);
+      const identity = targetIdentity(card, pattern);
+      const oldId = domCardIds.get(card);
+      const old = oldId ? previous.get(oldId) : null;
+      // Torn can recycle DOM nodes for different targets.
+      if (!oldId || (old && (old.identity !== identity ||
+          !patternsAgree(old.pattern, pattern)))) {
+        domCardIds.set(card, 'dom-' + nextDomCardId++);
+      }
+      const id = domCardIds.get(card);
+      return { id, pattern, identity, temporary: false, card };
+    });
+    // A DOM row disappearing during scrolling is not a completed target.
+    // Keep its saved rows in storage, and retain only current visible rows in memory.
+    const active = new Set(next.map(t => String(t.id)));
+    for (const key of exclusions.keys()) if (!active.has(key)) exclusions.delete(key);
+    allTargets = next;
+    hasServerList = true;
+    waitingForTargets = false;
+    const counts = new Map();
+    for (const target of next) if (target.identity)
+      counts.set(target.identity, (counts.get(target.identity) || 0) + 1);
+    for (const target of next) {
+      if (!exclusions.has(String(target.id))) {
+        if (target.identity && counts.get(target.identity) === 1)
+          restoreSavedRows(target);
+        else exclusions.set(String(target.id), []);
+      }
+    }
+    return next;
   }
 
   // ============================================
-  // Virtualised card identification
+  // Virtual-list measurements and identification
   // ============================================
 
-  function getCardIndex(card) {
-    if (!card) return -1;
+  function getTranslateY(transform) {
+    if (!transform || transform === 'none') {
+      return 0;
+    }
 
-    const virtualItem = card.closest(ITEM_SELECTOR);
+    const translate = transform.match(
+      /translateY\(\s*(-?[\d.]+)px\s*\)/
+    );
 
-    if (virtualItem) {
-      const list = virtualItem.closest(LIST_SELECTOR);
+    if (translate) {
+      return Number(translate[1]);
+    }
 
-      if (list) {
-        const items = Array.from(
-          list.children
-        ).filter(item =>
-          item.matches(ITEM_SELECTOR)
-        );
+    const translate3d = transform.match(
+      /translate3d\(\s*[^,]+,\s*(-?[\d.]+)px/
+    );
 
-        const directIndex = items.indexOf(virtualItem);
+    if (translate3d) {
+      return Number(translate3d[1]);
+    }
 
-        if (directIndex >= 0) {
-          const baseY = getTranslateY(
-            virtualItem.style.transform
-          );
+    const matrix = transform.match(
+      /matrix\(([^)]+)\)/
+    );
 
-          const estimatedIndex =
-            Math.round(baseY / 51);
+    if (matrix) {
+      const values = matrix[1]
+        .split(',')
+        .map(Number);
 
-          if (
-            estimatedIndex >= 0 &&
-            estimatedIndex < allTargets.length
-          ) {
-            return estimatedIndex;
-          }
+      return values[5] || 0;
+    }
 
-          return directIndex;
-        }
+    return 0;
+  }
+
+  function getRowState(row) {
+    const inlineTransform =
+      row.style.transform || '';
+
+    let state = rowState.get(row);
+
+    if (!state) {
+      state = {
+        originalTransform: inlineTransform,
+        originalHeight: row.style.height || '',
+        appliedTransform: null,
+        appliedHeight: null,
+        baseY: getTranslateY(inlineTransform)
+      };
+
+      rowState.set(row, state);
+      return state;
+    }
+
+    if (
+      inlineTransform !== state.appliedTransform &&
+      inlineTransform !== state.originalTransform
+    ) {
+      state.originalTransform = inlineTransform;
+      state.baseY = getTranslateY(inlineTransform);
+      state.appliedTransform = null;
+    }
+
+    const inlineHeight = row.style.height || '';
+
+    if (
+      inlineHeight !== state.appliedHeight &&
+      inlineHeight !== state.originalHeight
+    ) {
+      state.originalHeight = inlineHeight;
+      state.appliedHeight = null;
+    }
+
+    return state;
+  }
+
+  function getOriginalRowY(row) {
+    return getRowState(row).baseY;
+  }
+
+  function getVirtualRows(list) {
+    return Array.from(list.children).filter(row =>
+      row.matches(ITEM_SELECTOR)
+    );
+  }
+
+  // Measure spacing from rendered virtual rows.
+  function measureRowSpacing(list) {
+    if (!list) return null;
+    const rows = getVirtualRows(list);
+    const positions = [...new Set(rows.map(getOriginalRowY))]
+      .filter(Number.isFinite).sort((a, b) => a - b);
+    if (positions.length < 3) return spacingCache.get(list) || null;
+
+    const differences = [];
+    for (let i = 1; i < positions.length; i++) {
+      const difference = positions[i] - positions[i - 1];
+      if (difference > 1) differences.push(difference);
+    }
+    if (differences.length < 2) return spacingCache.get(list) || null;
+
+    const minimum = Math.min(...differences);
+    // At least two occurrences of the smallest gap are needed.
+    // Otherwise there is insufficient evidence of consecutive rows.
+    const minimumCount = differences.filter(d => Math.abs(d - minimum) <= 1).length;
+    const consistent = differences.every(d => {
+      const multiple = Math.max(1, Math.round(d / minimum));
+      return Math.abs(d - multiple * minimum) <= 1;
+    });
+    if (!consistent || minimumCount < 2) {
+      spacingCache.delete(list);
+      return null;
+    }
+    const cached = spacingCache.get(list);
+    if (cached && Math.abs(cached - minimum) > 1) {
+      spacingCache.delete(list);
+    }
+    spacingCache.set(list, minimum);
+    return minimum;
+  }
+
+  function patternsAgree(cardPattern, targetPattern) {
+    if (
+      !cardPattern ||
+      !targetPattern ||
+      cardPattern.length !== targetPattern.length
+    ) {
+      return false;
+    }
+
+    for (let i = 0; i < cardPattern.length; i++) {
+      const cardCharacter = cardPattern[i];
+      const targetCharacter = targetPattern[i];
+
+      // Any character revealed in either source must
+      // agree with the other source when both are known.
+      if (
+        cardCharacter !== '.' &&
+        targetCharacter !== '.' &&
+        cardCharacter !== targetCharacter
+      ) {
+        return false;
       }
     }
 
-    return Array.from(
-      document.querySelectorAll('.crime-option')
-    ).indexOf(card);
+    return true;
   }
 
   function getTargetForCard(card) {
-    if (!card || !hasServerList) return null;
-
-    const pattern = readPattern(card);
-    const index = getCardIndex(card);
-
-    if (
-      index >= 0 &&
-      index < allTargets.length
-    ) {
-      const target = allTargets[index];
-
-      if (
-        target &&
-        target.pattern.length === pattern.length
-      ) {
-        return {
-          target,
-          index
-        };
-      }
-    }
-
-    const matches = allTargets
-      .map((target, targetIndex) => ({
-        target,
-        index: targetIndex
-      }))
-      .filter(entry =>
-        entry.target.pattern === pattern
-      );
-
-    if (matches.length === 1) {
-      return matches[0];
-    }
-
-    const currentIndex = allTargets.findIndex(
-      target =>
-        keyOf(target.id) ===
-        keyOf(selectedTargetId)
-    );
-
-    if (
-      currentIndex >= 0 &&
-      allTargets[currentIndex].pattern === pattern
-    ) {
-      return {
-        target: allTargets[currentIndex],
-        index: currentIndex
-      };
-    }
-
-    return null;
+    if (!card || !card.isConnected) return null;
+    const index = allTargets.findIndex(target => target.card === card);
+    return index >= 0 ? { target: allTargets[index], index } : null;
   }
 
   // ============================================
@@ -343,57 +426,51 @@
     return exclusions.get(key);
   }
 
-  function restoreSavedRows(target) {
-    if (!target || !target.fingerprint) return;
-
-    const key = keyOf(target.id);
-    const stored = saved[key];
-
-    if (
-      stored &&
-      stored.fingerprint === target.fingerprint &&
-      Array.isArray(stored.rows)
-    ) {
-      exclusions.set(
-        key,
-        stored.rows.map(row =>
-          normaliseRow(row, target.pattern.length)
-        )
-      );
-    } else {
-      exclusions.set(key, []);
-    }
+  // Seven-day retention; pattern compatibility prevents restoration when
+  // previously revealed characters conflict. No manual restore is required.
+  function storedMatch(target) {
+    const record = target?.identity ? saved[target.identity] : null;
+    if (!record || !Array.isArray(record.rows) ||
+        !Number.isFinite(record.updated) ||
+        Date.now() - record.updated >= SAVED_GUESS_TTL_MS ||
+        !patternsAgree(record.pattern, target.pattern)) return null;
+    return record;
   }
 
-  function saveExclusions() {
-    if (!hasServerList || waitingForTargets) return;
+  function restoreSavedRows(target) {
+    const key = keyOf(target.id);
+    const record = storedMatch(target);
+    exclusions.set(key, record
+      ? record.rows.map(row => normaliseRow(row, target.pattern.length))
+      : []);
+  }
 
-    const output = {};
-
-    for (const target of allTargets) {
-      const key = keyOf(target.id);
-
-      const rows = (exclusions.get(key) || [])
-        .map(row =>
-          normaliseRow(row, target.pattern.length)
-        )
-        .filter(row => /[a-z0-9]/.test(row));
-
-      if (rows.length && target.fingerprint) {
-        output[key] = {
-          fingerprint: target.fingerprint,
-          rows
-        };
-      }
-    }
-
+  function saveExclusions(target) {
+    if (!target?.identity) return;
+    const key = keyOf(target.id);
+    const rows = (exclusions.get(key) || [])
+      .map(row => normaliseRow(row, target.pattern.length))
+      .filter(row => /[a-z0-9]/.test(row));
     try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify(output)
-      );
-
+      // Re-read storage so separate page instances cannot overwrite unrelated keys.
+      const current = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      const output = current && typeof current === 'object' && !Array.isArray(current)
+        ? current : {};
+      for (const [identity, record] of Object.entries(output)) {
+        if (!record || !Number.isFinite(record.updated) ||
+            Date.now() - record.updated >= SAVED_GUESS_TTL_MS) {
+          delete output[identity];
+        }
+      }
+      if (rows.length) {
+        output[target.identity] = { pattern: target.pattern, rows, updated: Date.now() };
+      } else {
+        delete output[target.identity];
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(output));
       saved = output;
+      // Preserve blank editor rows in memory. Only populated rows belong in storage.
+      // Otherwise clicking + immediately removes the newly added empty row.
     } catch (error) {
       console.warn('[TCH] Save failed', error);
     }
@@ -412,8 +489,16 @@
     selectedCandidate = 0;
     lastSignature = '';
 
-    saveExclusions();
-    scheduleRefresh();
+    saveExclusions(target);
+    if (document.activeElement?.classList?.contains('tch-exclusion-cell')) {
+      clearTimeout(editorRefreshTimer);
+      editorRefreshTimer = setTimeout(() => {
+        editorRefreshTimer = null;
+        scheduleRefresh();
+      }, 650);
+    } else {
+      scheduleRefresh();
+    }
   }
 
   function addRow(target) {
@@ -421,10 +506,9 @@
 
     const rows = [...getRows(target)];
 
-    if (!rows.length) {
-      rows.push(emptyRow(target.pattern.length));
-    }
-
+    // When there are no saved rows, the editor displays an unsaved first
+    // placeholder. Materialise it before adding the next blank row.
+    if (!rows.length) rows.push(emptyRow(target.pattern.length));
     rows.push(emptyRow(target.pattern.length));
 
     setRows(target, rows);
@@ -492,93 +576,6 @@
   }
 
   // ============================================
-  // Server target list
-  // ============================================
-
-  function updateList(found) {
-    if (!Array.isArray(found)) return;
-
-    const previous = new Map(
-      allTargets.map(target => [
-        keyOf(target.id),
-        target
-      ])
-    );
-
-    const next = found
-      .filter(target => target?.ID != null)
-      .map(target => {
-        const old = previous.get(keyOf(target.ID));
-
-        return {
-          id: target.ID,
-          pattern:
-            patternFromTarget(target) ||
-            old?.pattern ||
-            '',
-          fingerprint: fingerprint(target),
-          temporary: false
-        };
-      });
-
-    const previousSelection =
-      selectedTargetId == null
-        ? null
-        : keyOf(selectedTargetId);
-
-    const activeIDs = new Set(
-      next.map(target => keyOf(target.id))
-    );
-
-    for (const key of exclusions.keys()) {
-      if (!activeIDs.has(key)) {
-        exclusions.delete(key);
-      }
-    }
-
-    for (const target of next) {
-      const key = keyOf(target.id);
-      const old = previous.get(key);
-
-      if (
-        !exclusions.has(key) ||
-        (
-          old &&
-          old.fingerprint !== target.fingerprint
-        )
-      ) {
-        restoreSavedRows(target);
-      }
-    }
-
-    allTargets = next;
-    hasServerList = true;
-    waitingForTargets = false;
-
-    const index = allTargets.findIndex(
-      target =>
-        keyOf(target.id) === previousSelection
-    );
-
-    if (index >= 0) {
-      selectedTarget = index;
-    } else {
-      selectedTarget = Math.min(
-        selectedTarget,
-        Math.max(0, next.length - 1)
-      );
-
-      selectedCandidate = 0;
-    }
-
-    selectedTargetId =
-      allTargets[selectedTarget]?.id ?? null;
-
-    saveExclusions();
-
-    lastSignature = '';
-    scheduleRefresh();
-  }
 
   // ============================================
   // Candidate matching
@@ -686,9 +683,15 @@
 
   function getText(url) {
     return new Promise((resolve, reject) => {
-      if (typeof GM_xmlhttpRequest === 'function') {
+      const request = typeof GM_xmlhttpRequest === 'function'
+        ? GM_xmlhttpRequest
+        : (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function'
+          ? GM.xmlHttpRequest.bind(GM)
+          : (typeof GM !== 'undefined' && typeof GM.xmlhttpRequest === 'function'
+            ? GM.xmlhttpRequest.bind(GM) : null));
+      if (request) {
         try {
-          GM_xmlhttpRequest({
+          request({
             method: 'GET',
             url,
             timeout: 45000,
@@ -1062,120 +1065,16 @@
       checkPageNavigation
     );
 
-    const targetWindow =
-      typeof unsafeWindow !== 'undefined'
-        ? unsafeWindow
-        : window;
-
-    try {
-      for (const method of [
-        'pushState',
-        'replaceState'
-      ]) {
-        const original =
-          targetWindow.history[method];
-
-        if (typeof original !== 'function') continue;
-
-        targetWindow.history[method] =
-          function (...args) {
-            const result = original.apply(this, args);
-
-            setTimeout(checkPageNavigation, 0);
-
-            return result;
-          };
-      }
-    } catch (error) {
-      console.warn(
-        '[TCH] History monitoring unavailable',
-        error
-      );
-    }
+    // Do not monkeypatch page history methods in Firefox.
+    // The low-frequency navigation check in init() covers SPA transitions.
 
     checkPageNavigation();
   }
 
+
   // ============================================
   // Virtual list positioning
   // ============================================
-
-  function getTranslateY(transform) {
-    if (!transform || transform === 'none') {
-      return 0;
-    }
-
-    const translate = transform.match(
-      /translateY\(\s*(-?[\d.]+)px\s*\)/
-    );
-
-    if (translate) {
-      return Number(translate[1]);
-    }
-
-    const translate3d = transform.match(
-      /translate3d\(\s*[^,]+,\s*(-?[\d.]+)px/
-    );
-
-    if (translate3d) {
-      return Number(translate3d[1]);
-    }
-
-    const matrix = transform.match(
-      /matrix\(([^)]+)\)/
-    );
-
-    if (matrix) {
-      const values = matrix[1]
-        .split(',')
-        .map(Number);
-
-      return values[5] || 0;
-    }
-
-    return 0;
-  }
-
-  function getRowState(row) {
-    const inlineTransform =
-      row.style.transform || '';
-
-    let state = rowState.get(row);
-
-    if (!state) {
-      state = {
-        originalTransform: inlineTransform,
-        originalHeight: row.style.height || '',
-        appliedTransform: null,
-        appliedHeight: null,
-        baseY: getTranslateY(inlineTransform)
-      };
-
-      rowState.set(row, state);
-      return state;
-    }
-
-    if (
-      inlineTransform !== state.appliedTransform &&
-      inlineTransform !== state.originalTransform
-    ) {
-      state.originalTransform = inlineTransform;
-      state.baseY = getTranslateY(inlineTransform);
-      state.appliedTransform = null;
-    }
-
-    const inlineHeight = row.style.height || '';
-
-    if (
-      inlineHeight !== state.appliedHeight &&
-      inlineHeight !== state.originalHeight
-    ) {
-      state.originalHeight = inlineHeight;
-      state.appliedHeight = null;
-    }
-
-    return state;
-  }
 
   function setRowTransform(row, state, offset) {
     const desired = offset
@@ -1203,8 +1102,10 @@
       return;
     }
 
-    const original =
-      parseFloat(state.originalHeight) || 51;
+    const original = parseFloat(state.originalHeight) ||
+      measureRowSpacing(row.closest(LIST_SELECTOR)) ||
+      (row.offsetHeight - Math.max(0, parseFloat(state.appliedHeight) || 0)) ||
+      row.offsetHeight;
 
     const desired = (original + extra) + 'px';
 
@@ -1291,8 +1192,8 @@
           state.originalHeight;
       }
 
-      state.appliedTransform = null;
       state.appliedHeight = null;
+      state.appliedTransform = null;
     }
 
     const state = listState.get(list);
@@ -1347,11 +1248,7 @@
 
       activeVirtualList = list;
 
-      const rows = Array.from(
-        list.children
-      ).filter(row =>
-        row.matches(ITEM_SELECTOR)
-      );
+      const rows = getVirtualRows(list);
 
       const selectedState =
         getRowState(selectedRow);
@@ -1359,10 +1256,15 @@
       const selectedY =
         selectedState.baseY;
 
+      const measuredSpacing =
+        measureRowSpacing(list);
+
       const originalRowHeight =
         parseFloat(
           selectedState.originalHeight
-        ) || 51;
+        ) ||
+        measuredSpacing ||
+        selectedRow.offsetHeight;
 
       const wrapper =
         selectedRow.querySelector(
@@ -1808,6 +1710,8 @@
   }
 
   // ============================================
+
+  // ============================================
   // Embedded panel
   // ============================================
 
@@ -1846,8 +1750,6 @@
       'tch-toggle'
     );
 
-    toggle.removeAttribute('title');
-
     header.appendChild(toggle);
 
     panel.appendChild(header);
@@ -1872,7 +1774,12 @@
       selectedCard.isConnected &&
       cards.includes(selectedCard)
     ) {
-      return selectedCard;
+      const resolved = getTargetForCard(selectedCard);
+
+      if ((resolved && keyOf(resolved.target.id) === keyOf(selectedTargetId)) ||
+          (!resolved && selectedTargetId == null)) {
+        return selectedCard;
+      }
     }
 
     if (!hasServerList) {
@@ -1908,6 +1815,7 @@
     if (!card) {
       if (panel.isConnected) panel.remove();
 
+      selectedCard = null;
       scheduleLayout();
       return;
     }
@@ -2002,6 +1910,12 @@
             (position + 1)
         );
 
+        input.addEventListener('blur', () => {
+          clearTimeout(editorRefreshTimer);
+          editorRefreshTimer = null;
+          scheduleRefresh();
+        });
+
         input.addEventListener('input', () => {
           const character =
             normaliseCharacter(input.value);
@@ -2087,6 +2001,28 @@
   // Rendering
   // ============================================
 
+  function updateCandidateDisplay(body, target) {
+    if (!wordCount) return;
+    const results = candidates(target);
+    selectedCandidate = Math.max(0, Math.min(selectedCandidate, results.length - 1));
+    const title = body.querySelector('.tch-candidate-title');
+    if (title) {
+      const spans = title.querySelectorAll('span');
+      if (spans[0]) spans[0].textContent = 'Top ' + (results.length || MAX_CANDIDATES) + ' Candidates';
+      if (spans[1]) spans[1].textContent = results.length ?
+        (selectedCandidate + 1) + ' / ' + results.length : '0 / 0';
+    }
+    const answer = body.querySelector('.tch-answer');
+    if (answer) {
+      answer.textContent = results.length ?
+        results[selectedCandidate].toUpperCase() : 'No password candidates';
+      answer.classList.toggle('tch-answer-empty', !results.length);
+    }
+    const buttons = body.querySelectorAll('.tch-candidate-button');
+    if (buttons[0]) buttons[0].disabled = selectedCandidate === 0;
+    if (buttons[1]) buttons[1].disabled = selectedCandidate >= results.length - 1;
+  }
+
   function refresh() {
     if (!document.body) return;
 
@@ -2112,6 +2048,10 @@
     attachToolbar();
 
     const targets = readTargets();
+    if (selectedCard && !selectedCard.isConnected) {
+      selectedCard = null;
+      selectedTargetId = null;
+    }
 
     let active = null;
     let targetReady = false;
@@ -2128,30 +2068,37 @@
       }
     }
 
-    if (!active && hasServerList) {
-      const index = allTargets.findIndex(
-        target =>
-          keyOf(target.id) ===
-          keyOf(selectedTargetId)
-      );
-
-      if (index >= 0) {
-        selectedTarget = index;
-      }
-
-      active = allTargets[selectedTarget] || null;
-
-      if (active) {
-        selectedTargetId = active.id;
-        targetReady = true;
-      }
+    if (!active && hasServerList && !selectedCard?.isConnected) {
+      // Selection is retained by ID only for locating its card.
+      // Never mark a target as verified without matching a card.
+      const index = allTargets.findIndex(target =>
+        keyOf(target.id) === keyOf(selectedTargetId));
+      if (index >= 0) selectedTarget = index;
     }
 
-    if (!active && !hasServerList) {
-      active = targets[selectedTarget];
+    if (!active && !selectedCard?.isConnected && targets.length) {
+      selectedTarget = Math.min(selectedTarget, targets.length - 1);
+      selectedCard = targets[selectedTarget].card;
+      selectedTargetId = targets[selectedTarget].id;
     }
 
     attachPanel();
+    // Attach may select a new card; verify it before rendering data.
+    if (selectedCard?.isConnected) {
+      const resolved = getTargetForCard(selectedCard);
+      if (resolved) {
+        active = resolved.target;
+        selectedTarget = resolved.index;
+        selectedTargetId = resolved.target.id;
+        targetReady = true;
+      } else {
+        active = null;
+        targetReady = false;
+      }
+    } else {
+      active = null;
+      targetReady = false;
+    }
 
     const signature = JSON.stringify([
       source,
@@ -2174,10 +2121,7 @@
         : null
     ]);
 
-    if (signature === lastSignature) {
-      scheduleLayout();
-      return;
-    }
+    if (signature === lastSignature) return;
 
     lastSignature = signature;
 
@@ -2200,6 +2144,15 @@
         start: focused.selectionStart,
         end: focused.selectionEnd
       };
+    }
+
+    // Never replace focused input nodes while the mobile keyboard is active.
+    // A later blur or idle refresh can rebuild the editor safely.
+    if (focusInfo && active && targetReady &&
+        body.querySelector('.tch-exclusion-list')) {
+      updateCandidateDisplay(body, active);
+      scheduleLayout();
+      return;
     }
 
     body.replaceChildren();
@@ -2392,65 +2345,6 @@
   }
 
   // ============================================
-  // Network response listener
-  // ============================================
-
-  function inspectResponse(data) {
-    const found =
-      data?.DB?.crimesByType?.targets;
-
-    if (Array.isArray(found)) {
-      updateList(found);
-    }
-  }
-
-  function watchResponses() {
-    const targetWindow =
-      typeof unsafeWindow !== 'undefined'
-        ? unsafeWindow
-        : window;
-
-    const original = targetWindow.fetch;
-
-    if (typeof original !== 'function') return;
-
-    try {
-      targetWindow.fetch =
-        function (...args) {
-          const promise = original.apply(this, args);
-
-          try {
-            const input = args[0];
-
-            const url =
-              typeof input === 'string'
-                ? input
-                : input?.url;
-
-            if (
-              url &&
-              /sid=crimesData/.test(url)
-            ) {
-              promise
-                .then(response =>
-                  response.clone().json()
-                )
-                .then(inspectResponse)
-                .catch(() => {});
-            }
-          } catch (_) {}
-
-          return promise;
-        };
-    } catch (error) {
-      console.warn(
-        '[TCH] Fetch interception unavailable',
-        error
-      );
-    }
-  }
-
-  // ============================================
   // Select password by tapping its slots
   // ============================================
 
@@ -2508,83 +2402,49 @@
     if (initialized) return;
     initialized = true;
 
-    watchResponses();
     installTargetSelection();
     installNavigationWatcher();
 
-    const observer = new MutationObserver(
-      mutations => {
-        let needsRefresh = false;
-        let needsLayout = false;
-        let needsToolbar = false;
-
-        for (const mutation of mutations) {
-          const target = mutation.target;
-
-          if (
-            target instanceof Element &&
-            target.closest(
-              '#tch-embedded, #tch-global-toolbar'
-            )
-          ) {
-            continue;
-          }
-
-          if (mutation.type === 'attributes') {
-            if (
-              target instanceof Element &&
-              (
-                target.matches(ITEM_SELECTOR) ||
-                target.matches(LIST_SELECTOR)
-              )
-            ) {
-              needsLayout = true;
-            }
-
-            continue;
-          }
-
-          if (mutation.type === 'childList') {
-            needsRefresh = true;
-
-            if (isCracking()) {
-              needsToolbar = true;
-            }
-          }
-
-          if (mutation.type === 'characterData') {
-            needsRefresh = true;
-          }
+    const observer = new MutationObserver(mutations => {
+      if (!isCracking()) return;
+      let needsRefresh = false;
+      let needsLayout = false;
+      let needsToolbar = false;
+      for (const mutation of mutations) {
+        const target = mutation.target;
+        if (!(target instanceof Element)) {
+          if (mutation.type === 'characterData' &&
+              target.parentElement?.closest('.crime-option')) needsRefresh = true;
+          continue;
         }
-
-        if (
-          needsToolbar &&
-          (
-            !toolbar?.isConnected ||
-            !toolbarHost?.isConnected
-          )
-        ) {
-          attachToolbar();
-        }
-
-        if (needsRefresh) {
-          scheduleRefresh();
-        } else if (needsLayout) {
-          scheduleLayout();
+        if (target.closest('#tch-embedded, #tch-global-toolbar')) continue;
+        if (mutation.type === 'attributes') {
+          if (target.matches(ITEM_SELECTOR)) {
+            const state = rowState.get(target);
+            if (state && target.style.transform === state.appliedTransform &&
+                target.style.height === state.appliedHeight) continue;
+            needsLayout = true;
+            needsRefresh = true;
+          } else if (target.matches(LIST_SELECTOR)) {
+            const state = listState.get(target);
+            if (state && target.style.height === state.appliedHeight) continue;
+            needsLayout = true;
+          }
+        } else if (mutation.type === 'childList') {
+          if (target.closest('.crime-option') || target.matches(LIST_SELECTOR) ||
+              target.closest(LIST_SELECTOR)) needsRefresh = true;
+          if (!toolbar?.isConnected || !toolbarHost?.isConnected) needsToolbar = true;
         }
       }
-    );
+      if (needsToolbar) attachToolbar();
+      if (needsRefresh) scheduleRefresh();
+      else if (needsLayout) scheduleLayout();
+    });
 
-    observer.observe(
-      document.body,
-      {
-        childList: true,
-        subtree: true,
-        characterData: true,
-        attributes: true,
-        attributeFilter: ['style']
-      }
-    );
+    observer.observe(document.body, {
+      childList: true, subtree: true, characterData: true,
+      attributes: true, attributeFilter: ['style']
+    });
 
     window.addEventListener(
       'resize',
@@ -2607,21 +2467,14 @@
       );
     }
 
+    // Low-frequency fallback for DOM changes missed by the observer.
     setInterval(() => {
       checkPageNavigation();
-
       if (isCracking()) {
-        if (
-          !toolbar?.isConnected ||
-          !toolbarHost?.isConnected
-        ) {
-          attachToolbar();
-        }
-
-        scheduleRefresh();
-        scheduleLayout();
+        if (!toolbar?.isConnected || !toolbarHost?.isConnected) attachToolbar();
+        if (!panel?.isConnected || !selectedCard?.isConnected) scheduleRefresh();
       }
-    }, 500);
+    }, 2000);
 
     scheduleRefresh();
     loadWords();
