@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Torn Cracking Helper
 // @namespace    craigicorn.torn.cracking-helper
-// @version      1.5.2
+// @version      1.5.3
 // @description  Embedded Cracking Helper with dictionary suggestions and locally saved incorrect guesses
 // @author       craigicorn[3850118]
-// @match        https://www.torn.com/page.php*
-// @match        https://www.torn.com/loader.php*
+// @match        https://www.torn.com/page.php?sid=crimes*
+// @match        https://www.torn.com/loader.php?sid=crimes*
 // @run-at       document-idle
 // @grant        GM.xmlHttpRequest
 // @grant        GM_xmlhttpRequest
